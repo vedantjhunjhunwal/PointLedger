@@ -6,7 +6,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: '21' }
+        with: { distribution: temurin, java-version: '21', cache: maven }
+      - run: ./scripts/fetch-deps.sh
       - run: ./test.sh
       - uses: actions/setup-node@v4
         with: { node-version: '20' }

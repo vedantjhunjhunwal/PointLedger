@@ -1,6 +1,15 @@
 package dev.pointledger;
 
+import com.google.inject.AbstractModule;
+import com.google.inject.CreationException;
+import com.google.inject.Guice;
+import com.google.inject.Injector;
+import com.google.inject.Provides;
+import com.google.inject.Stage;
+import com.google.inject.util.Modules;
 import dev.pointledger.api.HttpApi;
+import dev.pointledger.di.PointLedgerModule;
+import dev.pointledger.di.WallClock;
 import dev.pointledger.engine.DurableEngine;
 import dev.pointledger.engine.Model.*;
 import dev.pointledger.engine.PointsEngine;
@@ -21,8 +30,9 @@ import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
 
-/** Dependency-free test runner: {@code java -cp out/main:out/test dev.pointledger.TestMain}. */
+/** Plain-Java test runner (no test framework): {@code java -cp "out/main:out/test:lib/*" dev.pointledger.TestMain}. */
 public final class TestMain {
 
     interface Test { void run() throws Exception; }
@@ -49,6 +59,9 @@ public final class TestMain {
         TESTS.put("durable: a torn last line from a crash is dropped", TestMain::tornTail);
         TESTS.put("http: concurrent retries with one Idempotency-Key run once", TestMain::httpIdempotency);
         TESTS.put("json: strict parser round-trips and rejects bad input", TestMain::json);
+        TESTS.put("di: injector shares one engine and API per command log", TestMain::diSingletons);
+        TESTS.put("di: Modules.override swaps the wall clock for tests", TestMain::diClockOverride);
+        TESTS.put("di: a tampered log fails injector creation before serving", TestMain::diFailFast);
 
         int pass = 0, fail = 0;
         for (var t : TESTS.entrySet()) {
@@ -415,6 +428,70 @@ public final class TestMain {
             expect(IllegalArgumentException.class, () -> Json.parse(bad));
         }
         expect(IllegalArgumentException.class, () -> Json.parse("[".repeat(100) + "]".repeat(100)));
+    }
+
+    // ------------------------------------------------------------------ dependency injection
+
+    static App.Config config(Path log) {
+        return new App.Config(0, log, false, 2000, YEAR, log.resolveSibling("no-dashboard"));
+    }
+
+    static void diSingletons() throws Exception {
+        Path log = Files.createTempDirectory("pl").resolve("cmd.log");
+        AtomicLong clock = new AtomicLong(1_700_000_000_000L);
+        String head;
+        try (DurableEngine d = new DurableEngine(log, false, clock::get, 2000, YEAR)) {
+            workload(d, clock);
+            head = d.engine().ledger().headHash();
+        }
+        Injector injector = Guice.createInjector(Stage.PRODUCTION, new PointLedgerModule(config(log)));
+        DurableEngine a = injector.getInstance(DurableEngine.class), b = injector.getInstance(DurableEngine.class);
+        try {
+            check(a == b, "DurableEngine must be a singleton (one writer per log)");
+            check(injector.getInstance(HttpApi.class) == injector.getInstance(HttpApi.class), "HttpApi singleton");
+            check(a.replayedCommands() > 0, "injector-built engine replayed the log");
+            check(a.engine().ledger().headHash().equals(head), "same hash chain as the engine that wrote it");
+            check(a.engine().audit().ok(), "audit");
+        } finally {
+            a.close();
+        }
+    }
+
+    static void diClockOverride() throws Exception {
+        Path log = Files.createTempDirectory("pl").resolve("cmd.log");
+        long start = 1_700_000_000_000L;
+        AtomicLong fake = new AtomicLong(start);
+        Injector injector = Guice.createInjector(Stage.PRODUCTION,
+                Modules.override(new PointLedgerModule(config(log))).with(new AbstractModule() {
+                    @Provides @WallClock LongSupplier clock() { return fake::get; }
+                }));
+        try (DurableEngine d = injector.getInstance(DurableEngine.class)) {
+            workload(d, fake); // advances the fake clock ~450 days and expires lots
+            check(d.engine().audit().ok(), "audit");
+            check(d.engine().ledger().size() > 0, "ledger written");
+        }
+        List<String> lines = Files.readAllLines(log);
+        long first = ((Number) ((Map<?, ?>) Json.parse(lines.get(0))).get("t")).longValue();
+        long last = ((Number) ((Map<?, ?>) Json.parse(lines.get(lines.size() - 1))).get("t")).longValue();
+        check(first == start, "first command stamped by the injected clock, got " + first);
+        check(last - first >= 400 * DAY, "fake clock moved commands >400 days in milliseconds of real time");
+    }
+
+    static void diFailFast() throws Exception {
+        Path log = Files.createTempDirectory("pl").resolve("cmd.log");
+        AtomicLong clock = new AtomicLong(1_700_000_000_000L);
+        try (DurableEngine d = new DurableEngine(log, false, clock::get, 2000, YEAR)) { workload(d, clock); }
+        List<String> lines = new ArrayList<>(Files.readAllLines(log));
+        lines.set(1, lines.get(1).replaceFirst("\"t\":(\\d+)", "\"t\":1"));
+        Files.write(log, lines);
+        try {
+            Guice.createInjector(Stage.PRODUCTION, new PointLedgerModule(config(log)));
+            throw new AssertionError("a tampered log must stop startup");
+        } catch (CreationException expected) {
+            Throwable cause = expected.getErrorMessages().iterator().next().getCause();
+            check(cause instanceof IllegalStateException && cause.getMessage().contains("diverges"),
+                    "root cause should be the replay check, got " + cause);
+        }
     }
 
     // ------------------------------------------------------------------ assertions

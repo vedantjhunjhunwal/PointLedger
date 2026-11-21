@@ -1,16 +1,18 @@
 package dev.pointledger;
 
+import com.google.inject.Guice;
+import com.google.inject.Injector;
+import com.google.inject.Stage;
 import dev.pointledger.api.HttpApi;
+import dev.pointledger.di.PointLedgerModule;
 import dev.pointledger.engine.DurableEngine;
 
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 
 /**
- * Composition root: the one place where the object graph is wired, using plain constructor
- * injection (every class receives its collaborators; none creates them itself), so tests can
- * swap the clock or the log path freely.
+ * Entry point. The object graph is wired by Guice in {@link PointLedgerModule}; this class only
+ * reads configuration, builds the injector and starts the HTTP server.
  */
 public final class App {
 
@@ -34,12 +36,13 @@ public final class App {
     public static void main(String[] args) throws Exception {
         Config cfg = Config.fromEnv();
         long t0 = System.nanoTime();
-        DurableEngine durable = new DurableEngine(cfg.commandLog(), cfg.fsync(), System::currentTimeMillis,
-                cfg.maxRewardBp(), cfg.validity());
-        Path staticDir = Files.isDirectory(cfg.staticDir()) ? cfg.staticDir().toAbsolutePath().normalize() : null;
-        HttpApi api = new HttpApi(durable, staticDir);
+        // PRODUCTION stage builds singletons eagerly: the command log is replayed and verified here.
+        Injector injector = Guice.createInjector(Stage.PRODUCTION, new PointLedgerModule(cfg));
+        DurableEngine durable = injector.getInstance(DurableEngine.class);
+        HttpApi api = injector.getInstance(HttpApi.class);
         int port = api.start(cfg.port());
         var audit = durable.engine().audit();
+        Path staticDir = PointLedgerModule.staticDir(cfg);
         System.out.printf("PointLedger on :%d | replayed %d commands in %d ms | audit ok=%s | dashboard=%s%n",
                 port, durable.replayedCommands(), (System.nanoTime() - t0) / 1_000_000, audit.ok(),
                 staticDir == null ? "off" : staticDir);
