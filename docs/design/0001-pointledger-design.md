@@ -105,8 +105,10 @@ Guice builds the object graph in one module (`PointLedgerModule`). See ADR-0003.
 * **Deploy:** CloudFormation (`deploy/aws/pointledger-ecs.yaml`), one ECS Fargate task, command log
   on encrypted EFS. Deploys stop the old task before starting the new one, because the log has a
   single writer.
-* **Suggested alarms (not yet in the template):** audit not ok; 5xx rate; replay time on restart
-  above a threshold (log growth signal).
+* **Alarms (in the template, to an SNS topic with optional email):** ledger audit failed at
+  startup (log metric filter on `audit ok=false`); task failing `/health` for 2 minutes;
+  5 or more 5xx responses in 5 minutes.
+* **Not yet monitored:** replay time on restart (a log-growth signal) and idempotency replay rate.
 
 ## 6. Testing
 

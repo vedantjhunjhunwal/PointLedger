@@ -101,7 +101,8 @@ Windows: `build.cmd`, then `java -cp "out\main;out\test;lib\*" dev.pointledger.T
 Docker: `docker build -t pointledger . && docker run -p 8080:8080 -v pl-data:/data pointledger`.
 
 AWS: push the image to ECR, then deploy `deploy/aws/pointledger-ecs.yaml` (CloudFormation:
-ECS Fargate task behind an ALB, command log on encrypted EFS, CloudWatch logs). The service runs
+ECS Fargate task behind an ALB, command log on encrypted EFS, CloudWatch logs, and CloudWatch alarms
+for a failed ledger audit, an unhealthy task and 5xx responses, sent to an SNS topic). The service runs
 one task and deploys stop the old task before starting the new one, because the command log has a
 single writer.
 
