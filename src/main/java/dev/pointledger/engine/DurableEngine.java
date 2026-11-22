@@ -37,6 +37,7 @@ public final class DurableEngine implements Closeable {
     private long commandTime;
     private String logHead = Ledger.GENESIS;
     private final long replayed;
+    private long logged;
 
     public DurableEngine(Path logFile, boolean fsync, LongSupplier wallClock, long maxRewardBp, Duration validity) {
         this.ledger = new Ledger();
@@ -47,6 +48,7 @@ public final class DurableEngine implements Closeable {
             if (logFile.getParent() != null) Files.createDirectories(logFile.getParent());
             truncateTornTail(logFile);
             this.replayed = replay(logFile);
+            this.logged = replayed;
             FileOutputStream out = new FileOutputStream(logFile.toFile(), true);
             this.channel = out.getChannel();
             this.writer = new BufferedWriter(new OutputStreamWriter(out, StandardCharsets.UTF_8));
@@ -67,22 +69,34 @@ public final class DurableEngine implements Closeable {
         return run("closeCampaign", Map.of("id", id), () -> engine.closeCampaign(id));
     }
 
+    // An exact retry of a command that already took effect is answered from current state and is
+    // not logged: logging it would change nothing on replay, but would grow the log and cost an
+    // fsync per retry (found by scripts/crash_drill.py: client retries after a restart doubled the
+    // log). The check and the command run under the same lock, so nothing can change in between.
+
     public OrderView placeOrder(OrderRequest r) {
-        return run("placeOrder", r, () -> engine.placeOrder(r));
+        return ledger.atomically(() -> engine.retryOfPlaceOrder(r)
+                .orElseGet(() -> run("placeOrder", r, () -> engine.placeOrder(r))));
     }
 
     public OrderView ship(String orderId) {
-        return run("ship", Map.of("id", orderId), () -> engine.ship(orderId));
+        return ledger.atomically(() -> engine.retryOfStatus(orderId, OrderStatus.SHIPPED)
+                .orElseGet(() -> run("ship", Map.of("id", orderId), () -> engine.ship(orderId))));
     }
 
     public OrderView cancel(String orderId) {
-        return run("cancel", Map.of("id", orderId), () -> engine.cancel(orderId));
+        return ledger.atomically(() -> engine.retryOfStatus(orderId, OrderStatus.CANCELLED)
+                .orElseGet(() -> run("cancel", Map.of("id", orderId), () -> engine.cancel(orderId))));
     }
 
     public CustomerView redeem(String customerId, long points, String redemptionId) {
-        return run("redeem", Map.of("customerId", customerId, "points", points, "redemptionId", redemptionId),
-                () -> engine.redeem(customerId, points, redemptionId));
+        return ledger.atomically(() -> engine.retryOfRedeem(customerId, points, redemptionId)
+                .orElseGet(() -> run("redeem", Map.of("customerId", customerId, "points", points, "redemptionId", redemptionId),
+                        () -> engine.redeem(customerId, points, redemptionId))));
     }
+
+    /** Number of lines in the command log (replayed at startup plus appended since). */
+    public long loggedCommands() { return ledger.atomically(() -> logged); }
 
     public long expireAll() {
         return run("expire", Map.of(), engine::expireAll);
@@ -101,6 +115,7 @@ public final class DurableEngine implements Closeable {
             line.put("h", h);
             append(Json.write(line));
             logHead = h;
+            logged++;
             return body.get();
         });
     }

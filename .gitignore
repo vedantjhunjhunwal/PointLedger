@@ -1,5 +1,6 @@
 out/
 data/
+lib/
 dashboard/node_modules/
 dashboard/dist/
 *.log

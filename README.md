@@ -1,8 +1,8 @@
 # PointLedger
 
 **Exactly-once loyalty points and seller-funded promotions on a hash-chained, double-entry ledger.**
-Java 21 service with zero third-party dependencies, a React + TypeScript dashboard, and an AWS
-(ECS Fargate + EFS) deployment template.
+Java 21 service wired with Google Guice (its only runtime dependency), a React + TypeScript
+dashboard, and an AWS (ECS Fargate + EFS) deployment template.
 
 Marketplaces in Japan pay out points on almost every order, and much of that is funded by sellers
 running their own campaigns ("+5% points on my store this week"). That makes points behave like
@@ -39,6 +39,7 @@ Invariants checked after every test and exposed at `GET /api/audit`:
 ## Architecture
 
 ```
+Guice injector (PointLedgerModule, Stage.PRODUCTION)
 HTTP (JDK HttpServer, virtual thread per request)
   └─ HttpApi ── idempotency store (key → request fingerprint → stored response)
        └─ DurableEngine ── write-ahead command log (JSON lines, hash-chained, optional fsync)
@@ -53,17 +54,23 @@ HTTP (JDK HttpServer, virtual thread per request)
 * **Event sourcing.** The engine is deterministic given each command and its timestamp, so the
   command log is the source of truth. On restart it is replayed and must reproduce the same ledger
   head hash; an edited, reordered or missing line stops startup.
-* **Constructor injection.** `App` is the only place that builds objects; the clock and log path
-  are injected, which is how tests run years of expiry in milliseconds.
+* **Dependency injection with Guice.** `PointLedgerModule` is the only place that builds the
+  graph. `DurableEngine` and `HttpApi` are singletons, so one injector means one writer per log.
+  The injector runs in `Stage.PRODUCTION`, so the log is replayed and verified while it is being
+  created and a tampered log stops startup before the port opens. The clock is a
+  `@WallClock LongSupplier`; tests swap it with `Modules.override` to run years of expiry in
+  milliseconds. Core classes keep plain constructors and no Guice annotations
+  ([ADR-0003](docs/adr/0003-guice-dependency-injection.md)).
 
 ## Measured results
 
-From `./test.sh` and `./bench.sh` on a 2-vCPU Linux container (JDK 21). Client and server
+From `./test.sh`, `./bench.sh` and `scripts/crash_drill.py` on a 2-vCPU Linux container (JDK 21). Client and server
 share the same two cores in the HTTP test, so treat throughput as a floor, not a ceiling.
 
 | What | Result |
 |---|---|
-| Test suite | 17/17 passing |
+| Test suite | 21/21 passing |
+| Crash drill (`kill -9` under 16-client load, 3 runs) | 45,405 acknowledged writes, 0 lost, 0 double awards, healthy again in < 1 s |
 | Optimizer vs brute force | identical optimum on 20,000 random orders |
 | Greedy baseline | suboptimal on 36.1% of those orders (≈33 points short when it was) |
 | Concurrency | 64 threads × 2,000 orders against one budget: zero overspend, all invariants hold |
@@ -75,25 +82,29 @@ share the same two cores in the HTTP test, so treat throughput as a floor, not a
 
 The test suite also covers tamper detection (an edited entry is found at the exact sequence
 number), time-travel balances, FIFO redemption, tax rounding, cancel-before-ship, a torn final
-log line, key reuse with a different body (HTTP 422), and a strict JSON parser.
+log line, key reuse with a different body (HTTP 422), a strict JSON parser, and the Guice wiring
+(one engine per log, clock override, fail-fast startup on a tampered log).
 
 ## Run it
 
-Needs JDK 21+ (and Node 20+ only for the dashboard).
+Needs JDK 21+ and Maven (once, to fetch Guice into `lib/`); Node 20+ only for the dashboard.
 
 ```bash
-./test.sh                 # 17 tests
+./scripts/fetch-deps.sh   # Guice jars into lib/ (build.sh runs this if lib/ is empty)
+./test.sh                 # 21 tests
+python3 scripts/crash_drill.py   # kill -9 under load, restart, verify (see docs/RUNBOOK.md)
 ./bench.sh                # benchmarks
 ./run.sh                  # builds the dashboard if needed, serves API + UI on :8080
 ./scripts/demo.sh         # seeds demo campaigns and orders into a running server
 ```
 
-Windows: `build.cmd`, then `java -cp out\main;out\test dev.pointledger.TestMain`.
+Windows: `build.cmd`, then `java -cp "out\main;out\test;lib\*" dev.pointledger.TestMain`.
 
 Docker: `docker build -t pointledger . && docker run -p 8080:8080 -v pl-data:/data pointledger`.
 
 AWS: push the image to ECR, then deploy `deploy/aws/pointledger-ecs.yaml` (CloudFormation:
-ECS Fargate task behind an ALB, command log on encrypted EFS, CloudWatch logs). The service runs
+ECS Fargate task behind an ALB, command log on encrypted EFS, CloudWatch logs, and CloudWatch alarms
+for a failed ledger audit, an unhealthy task and 5xx responses, sent to an SNS topic). The service runs
 one task and deploys stop the old task before starting the new one, because the command log has a
 single writer.
 
@@ -120,6 +131,17 @@ Every POST accepts `Idempotency-Key`. A replayed response carries `Idempotent-Re
   still dedupe because the engine itself is idempotent on them.
 * Returns after shipment (clawing points back) are not modelled.
 * Benchmarks use synthetic data.
+
+## Engineering process
+
+* [Design doc](docs/design/0001-pointledger-design.md): requirements, alternatives, operations, risks.
+* Decision records: [single writer](docs/adr/0001-single-writer-command-log.md),
+  [exact optimizer](docs/adr/0002-exact-stacking-optimizer.md),
+  [Guice](docs/adr/0003-guice-dependency-injection.md).
+* Every change lands through a PR reviewed against [CODE_REVIEW.md](docs/CODE_REVIEW.md), with CI green.
+* [Operations runbook](docs/RUNBOOK.md): what each alarm means, first response, and the crash drill.
+* Built with Claude Code as a pair programmer under the rules in [CLAUDE.md](CLAUDE.md); see
+  [AI-assisted development](docs/AI_ASSISTED_DEVELOPMENT.md) for what the agent does and doesn't do.
 
 ## License
 

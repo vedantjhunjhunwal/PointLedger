@@ -12,6 +12,13 @@ Parameters:
   PublicSubnetIds:
     Type: List<AWS::EC2::Subnet::Id>
     Description: Two public subnets in different AZs (load balancer and task)
+  AlarmEmail:
+    Type: String
+    Default: ''
+    Description: Optional email address subscribed to the alarm topic (leave empty to skip)
+
+Conditions:
+  HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, '']]
 
 Resources:
   LogGroup:
@@ -178,6 +185,77 @@ Resources:
           SecurityGroups: [!Ref TaskSecurityGroup]
       LoadBalancers: [{ ContainerName: pointledger, ContainerPort: 8080, TargetGroupArn: !Ref TargetGroup }]
 
+  # ---------------------------------------------------------------- monitoring
+
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: PointLedger alarms
+      Subscription: !If
+        - HasAlarmEmail
+        - [{ Protocol: email, Endpoint: !Ref AlarmEmail }]
+        - !Ref AWS::NoValue
+
+  # The app prints "audit ok=false" at startup if a ledger invariant fails after replay.
+  AuditFailureMetric:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref LogGroup
+      FilterPattern: '"audit ok=false"'
+      MetricTransformations:
+        - { MetricNamespace: PointLedger, MetricName: AuditFailures, MetricValue: '1', DefaultValue: 0 }
+
+  AuditFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Ledger audit failed at startup (conservation, hash chain, campaign or wallet invariant)
+      Namespace: PointLedger
+      MetricName: AuditFailures
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+
+  UnhealthyTaskAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: The single PointLedger task is failing /health checks
+      Namespace: AWS/ApplicationELB
+      MetricName: UnHealthyHostCount
+      Dimensions:
+        - { Name: LoadBalancer, Value: !GetAtt LoadBalancer.LoadBalancerFullName }
+        - { Name: TargetGroup, Value: !GetAtt TargetGroup.TargetGroupFullName }
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+      OKActions: [!Ref AlarmTopic]
+
+  Http5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: PointLedger returned 5 or more 5xx responses in 5 minutes
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_Target_5XX_Count
+      Dimensions:
+        - { Name: LoadBalancer, Value: !GetAtt LoadBalancer.LoadBalancerFullName }
+        - { Name: TargetGroup, Value: !GetAtt TargetGroup.TargetGroupFullName }
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+
 Outputs:
   Url:
     Value: !Sub http://${LoadBalancer.DNSName}
+  AlarmTopicArn:
+    Value: !Ref AlarmTopic

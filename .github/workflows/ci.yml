@@ -6,8 +6,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: '21' }
+        with: { distribution: temurin, java-version: '21', cache: maven }
+      - run: ./scripts/fetch-deps.sh
       - run: ./test.sh
+      - name: Crash drill (kill -9 under load, restart, verify)
+        run: python3 scripts/crash_drill.py --runs 1 --kill-after 3
       - uses: actions/setup-node@v4
         with: { node-version: '20' }
       - run: cd dashboard && npm ci && npm run build
