@@ -109,20 +109,25 @@ Guice builds the object graph in one module (`PointLedgerModule`). See ADR-0003.
   startup (log metric filter on `audit ok=false`); task failing `/health` for 2 minutes;
   5 or more 5xx responses in 5 minutes.
 * **Not yet monitored:** replay time on restart (a log-growth signal) and idempotency replay rate.
+* **Crash drill:** `scripts/crash_drill.py` kills the service under load and checks recovery (no
+  acknowledged write lost, no double award, audit ok). It found that client retries after a
+  restart were re-logged and doubled the log; fixed in v1.2. Procedures and results:
+  [RUNBOOK.md](../RUNBOOK.md).
 
 ## 6. Testing
 
-`./test.sh` runs 20 tests: conservation over 200,000 random transfers, tamper detection,
+`./test.sh` runs 21 tests: conservation over 200,000 random transfers, tamper detection,
 time-travel balances, optimizer = brute force on 20,000 orders, tax rounding, FIFO redemption,
 64-thread overspend test, replay to an identical hash chain, torn-tail recovery, HTTP retries
-under one key, a strict JSON parser, and three dependency-injection tests.
+under one key, exact retries after a restart not being re-logged, a strict JSON parser, and three
+dependency-injection tests. CI also runs a short crash drill on every push.
 
 ## 7. Risks and open questions
 
 1. **Single writer ceiling.** Measured ~11,700 orders/s on 2 vCPUs. The scale-out path is to
    shard by seller (budgets are per seller), one log per shard; cross-shard customer wallets
    would then need a two-phase transfer.
-2. **Log growth.** Replay time grows with history (76,000 commands in 3.5 s). Periodic
-   snapshots with the head hash would bound restart time.
+2. **Log growth.** Replay time grows with history (76,000 commands in 3.5 s). Exact retries are
+   no longer logged (v1.2); periodic snapshots with the head hash would bound restart time.
 3. **Post-shipment returns** are not modelled: should a return claw points back from the
    customer, and what if they were already redeemed?

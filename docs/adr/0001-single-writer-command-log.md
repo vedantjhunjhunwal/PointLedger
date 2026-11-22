@@ -24,6 +24,9 @@ dropped.
 * Throughput is capped by one writer (~11,700 orders/s measured on 2 vCPUs); scale-out means
   sharding by seller.
 * Deploys must never run two tasks on the same log (ECS deployment config enforces it).
+* After a crash the HTTP idempotency store is empty, so retries reach the engine. Since v1.2 an
+  exact retry of a command that already took effect is answered without a new log line (found
+  by the crash drill; see [RUNBOOK.md](../RUNBOOK.md)).
 
 ## Alternatives
 

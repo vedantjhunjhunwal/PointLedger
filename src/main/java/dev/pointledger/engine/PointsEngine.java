@@ -203,6 +203,32 @@ public final class PointsEngine {
         });
     }
 
+    // ------------------------------------------------------------------ exact-retry detection
+    // Read-only. DurableEngine uses these to answer a retry that would change nothing without
+    // appending (and fsyncing) a new command-log line. Each returns the current result only when
+    // running the command again would be a no-op; otherwise empty, and the command runs normally.
+
+    public Optional<OrderView> retryOfPlaceOrder(OrderRequest req) {
+        return ledger.atomically(() -> {
+            OrderState o = orders.get(req.orderId());
+            return o != null && o.request.equals(req) ? Optional.of(view(o)) : Optional.empty();
+        });
+    }
+
+    public Optional<OrderView> retryOfStatus(String orderId, OrderStatus target) {
+        return ledger.atomically(() -> {
+            OrderState o = orders.get(orderId);
+            return o != null && o.status == target ? Optional.of(view(o)) : Optional.empty();
+        });
+    }
+
+    public Optional<CustomerView> retryOfRedeem(String customerId, long points, String redemptionId) {
+        return ledger.atomically(() -> {
+            Long prev = redemptions.get(redemptionId);
+            return prev != null && prev == points ? Optional.of(customerView(customerId)) : Optional.empty();
+        });
+    }
+
     /** Moves every lot past its expiry to the breakage account. Returns points expired. */
     public long expireAll() {
         return ledger.atomically(() -> {

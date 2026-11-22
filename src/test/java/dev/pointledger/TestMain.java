@@ -57,6 +57,7 @@ public final class TestMain {
         TESTS.put("durable: restart replays the log to the identical hash chain", TestMain::replay);
         TESTS.put("durable: an edited log line refuses to load", TestMain::replayTamper);
         TESTS.put("durable: a torn last line from a crash is dropped", TestMain::tornTail);
+        TESTS.put("durable: exact retries after a restart are not re-logged", TestMain::retriesNotLogged);
         TESTS.put("http: concurrent retries with one Idempotency-Key run once", TestMain::httpIdempotency);
         TESTS.put("json: strict parser round-trips and rejects bad input", TestMain::json);
         TESTS.put("di: injector shares one engine and API per command log", TestMain::diSingletons);
@@ -368,6 +369,47 @@ public final class TestMain {
         Files.writeString(log, "{\"t\":1,\"op\":\"ship\",\"he", StandardCharsets.UTF_8, java.nio.file.StandardOpenOption.APPEND);
         try (DurableEngine d = new DurableEngine(log, false, clock::get, 2000, YEAR)) {
             check(d.engine().ledger().headHash().equals(head), "state after torn tail");
+        }
+    }
+
+    static void retriesNotLogged() throws Exception {
+        Path log = Files.createTempDirectory("pl").resolve("cmd.log");
+        AtomicLong clock = new AtomicLong(1_700_000_000_000L);
+        List<OrderRequest> placed = new ArrayList<>();
+        try (DurableEngine d = new DurableEngine(log, false, clock::get, 2000, YEAR)) {
+            d.createCampaign(camp("c1", "s1", 500, "", 400, 1_000_000));
+            for (int i = 0; i < 40; i++) {
+                OrderRequest r = new OrderRequest("o" + i, "u" + (i % 5), List.of(new Line("a", "s1", 1100 * (i + 1), 1, 10)));
+                d.placeOrder(r);
+                placed.add(r);
+                if (i % 4 == 0) d.cancel("o" + i); else d.ship("o" + i);
+            }
+            d.redeem("u1", 10, "r1");
+        }
+        long linesBefore = Files.readAllLines(log).size();
+        try (DurableEngine d = new DurableEngine(log, false, clock::get, 2000, YEAR)) {
+            String head = d.engine().ledger().headHash();
+            // a client that timed out retries everything with the same arguments
+            for (int i = 0; i < placed.size(); i++) {
+                OrderView v = d.placeOrder(placed.get(i));
+                check(v.orderId().equals("o" + i), "retry returns the existing order");
+                OrderView s = i % 4 == 0 ? d.cancel("o" + i) : d.ship("o" + i);
+                check(s.status() == (i % 4 == 0 ? OrderStatus.CANCELLED : OrderStatus.SHIPPED), "status after retry");
+            }
+            d.redeem("u1", 10, "r1");
+            check(d.loggedCommands() == linesBefore, "retries must not be logged: " + d.loggedCommands() + " vs " + linesBefore);
+            check(d.engine().ledger().headHash().equals(head), "retries must not change the ledger");
+            // a real change is still logged, and a changed retry is still refused
+            OrderRequest fresh = new OrderRequest("o-new", "u1", List.of(new Line("a", "s1", 5500, 1, 10)));
+            d.placeOrder(fresh);
+            check(d.loggedCommands() == linesBefore + 1, "a new order is logged");
+            OrderRequest changed = new OrderRequest("o1", "u1", List.of(new Line("a", "s1", 999, 1, 10)));
+            expect(RuntimeException.class, () -> d.placeOrder(changed));
+            check(d.engine().audit().ok(), "audit");
+        }
+        check(Files.readAllLines(log).size() == linesBefore + 2, "file: one new order + one refused command line");
+        try (DurableEngine d = new DurableEngine(log, false, () -> 0, 2000, YEAR)) {
+            check(d.engine().audit().ok(), "replays cleanly after retries");
         }
     }
 

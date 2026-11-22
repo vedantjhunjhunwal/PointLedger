@@ -64,12 +64,13 @@ HTTP (JDK HttpServer, virtual thread per request)
 
 ## Measured results
 
-From `./test.sh` and `./bench.sh` on a 2-vCPU Linux container (JDK 21). Client and server
+From `./test.sh`, `./bench.sh` and `scripts/crash_drill.py` on a 2-vCPU Linux container (JDK 21). Client and server
 share the same two cores in the HTTP test, so treat throughput as a floor, not a ceiling.
 
 | What | Result |
 |---|---|
-| Test suite | 20/20 passing |
+| Test suite | 21/21 passing |
+| Crash drill (`kill -9` under 16-client load, 3 runs) | 45,405 acknowledged writes, 0 lost, 0 double awards, healthy again in < 1 s |
 | Optimizer vs brute force | identical optimum on 20,000 random orders |
 | Greedy baseline | suboptimal on 36.1% of those orders (≈33 points short when it was) |
 | Concurrency | 64 threads × 2,000 orders against one budget: zero overspend, all invariants hold |
@@ -90,7 +91,8 @@ Needs JDK 21+ and Maven (once, to fetch Guice into `lib/`); Node 20+ only for th
 
 ```bash
 ./scripts/fetch-deps.sh   # Guice jars into lib/ (build.sh runs this if lib/ is empty)
-./test.sh                 # 20 tests
+./test.sh                 # 21 tests
+python3 scripts/crash_drill.py   # kill -9 under load, restart, verify (see docs/RUNBOOK.md)
 ./bench.sh                # benchmarks
 ./run.sh                  # builds the dashboard if needed, serves API + UI on :8080
 ./scripts/demo.sh         # seeds demo campaigns and orders into a running server
@@ -137,6 +139,7 @@ Every POST accepts `Idempotency-Key`. A replayed response carries `Idempotent-Re
   [exact optimizer](docs/adr/0002-exact-stacking-optimizer.md),
   [Guice](docs/adr/0003-guice-dependency-injection.md).
 * Every change lands through a PR reviewed against [CODE_REVIEW.md](docs/CODE_REVIEW.md), with CI green.
+* [Operations runbook](docs/RUNBOOK.md): what each alarm means, first response, and the crash drill.
 * Built with Claude Code as a pair programmer under the rules in [CLAUDE.md](CLAUDE.md); see
   [AI-assisted development](docs/AI_ASSISTED_DEVELOPMENT.md) for what the agent does and doesn't do.
 
